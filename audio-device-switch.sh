@@ -1,16 +1,42 @@
 #!/bin/bash
+# Switch between audio outputs
+#
+# Copyright 2022 Marcel Grolms
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-# disabled sink id
-disabledSinkId=0
 
-# disable sink
-disableSink=("1002:aaf0")
+notify=0
+while getopts d:nh flag
+do
+    case "${flag}" in
+        d) disable=${OPTARG};;
+        n) notify=1;;
+        *) echo "Usage: audio-device-switch -d \"vendor:productId vendor:productId\""; exit;;
+    esac
+done
 
 declare -i sinks_count=`pacmd list-sinks | grep -c index:[[:space:]][[:digit:]]`
-
 if [ $sinks_count -eq 0 ] ; then
+    echo "No audio output detected."
     exit
 fi
+
+IFS=' ' read -r -a disableSink <<< "$disable"
+
+arrSinkIndex=()
+arrDisabledSinkIndex=()
 
 while read row ; 
 do
@@ -21,43 +47,43 @@ do
     for sink in ${disableSink[@]}; do
         if [ $loopSink == $sink ] ; then
             #echo "Exclude sink with index $sink from switching"
-            disabledSinkId=${arrSink[0]}
+            arrDisabledSinkIndex+=(${arrSink[0]})
         fi
     done
-
 done <<<$(pacmd list-sinks | sed -n -e "s/[\ \*]*index:\ \([[:digit:]]\)\|[\  \t]*device\.product\.id\ \=\ \"\([0-9a-f]\{4\}\)\"\|[\ \t]*device\.vendor\.id\ =\ \"\(....\)\"\|[\ \t]*\(ports:\)/\1\2\3\4/p" | awk -v RS='ports:\n' -v FS='\n' -v ORS='\n' -v OFS=' ' '{ $1=$1 };1')
-
-echo "Disable sink ${arrSink[0]}"
 
 declare -i active_sink_index=`pacmd list-sinks | sed -n -e 's/[[:space:]][[:space:]]\*[[:space:]]index:[[:space:]]\([[:digit:]]\)/\1/p'`
 
-arrSinkIndex=()
-
 while read index ;
 do
-    if [ $index -ne $disabledSinkId ] ; then
+    if [ ${#a[@]} -ne 0 ] ; then
+        for disableSinkIndex in ${arrDisabledSinkIndex[@]}; do
+            if [ $index -ne $disableSinkIndex ] ; then
+                arrSinkIndex[${#arrSinkIndex[@]}]=$index
+            fi
+        done
+    else
         arrSinkIndex[${#arrSinkIndex[@]}]=$index
     fi
 done < <(pacmd list-sinks | sed -n -e 's/[\*\ ]*index:[[:space:]]\([[:digit:]]\)/\1/p')
 
 active_index_position_found=0
 let next_sink_index=-1
-while read index ;
-do
-    if [ $next_sink_index -lt 0 ] ; then
+
+for index in ${arrSinkIndex[@]}; do
+  if [ $next_sink_index -lt 0 ] ; then
         export next_sink_index=$index
     fi
     if [ $active_index_position_found -eq 1 ] ; then
-        if [ $index -ne $disabledSinkId ] ; then
+        if [[ ! "${arrDisabledSinkIndex[*]}" =~ "${index}" ]]; then
             export next_sink_index=$index
             break;
         fi
     fi
     if [ $active_sink_index -eq $index ] ; then
         export active_index_position_found=1
-    fi
-done < <(pacmd list-sinks | sed -n -e 's/[\*\ ]*index:[[:space:]]\([[:digit:]]\)/\1/p')
-
+    fi  
+done
 
 #change the default sink
 pacmd "set-default-sink ${next_sink_index}"
@@ -69,13 +95,14 @@ do
 done
 
 #display notification
-ndx=0
-pacmd list-sinks | sed -n -e 's/device.description[[:space:]]=[[:space:]]"\(.*\)"/\1/p' | while read line;
-do
-    if [ $next_sink_index -eq ${arrSinkIndex[$ndx]} ] ; then
-        notify-send -i preferences-desktop-multimedia "Sound output switched to:" "$line"
-        exit
-    fi
-    ((ndx++))
-done;
-
+if [ $notify -ne 0 ] ; then
+    ndx=0
+    pacmd list-sinks | sed -n -e 's/device.description[[:space:]]=[[:space:]]"\(.*\)"/\1/p' | while read line;
+    do
+        if [ $next_sink_index -eq ${arrSinkIndex[$ndx]} ] ; then
+            notify-send -i preferences-desktop-multimedia "Sound output switched to:" "$line"
+            exit
+        fi
+        ((ndx++))
+    done;
+fi
