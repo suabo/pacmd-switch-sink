@@ -1,0 +1,201 @@
+#!/bin/bash
+# Pulse Audio Command to switch between sinks (audio output channel)
+#
+# Copyright 2022 Marcel Grolms
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+SCRIPT_NAME="pacmd-switch-sink"
+SCRIPT_DESCRIPTION="Pulse Audio command to switch to next available sink"
+SCRIPT_VERSION=1.0.0
+
+all_sinks=()
+all_sink_ids=()
+available_sink_ids=()
+ignore_sink_ids=()
+ignore_sinks=()
+
+notify=0
+
+# check for available sinks
+sinks_count=$(pacmd list-sinks | grep -c "index:[[:space:]][[:digit:]]")
+if [ "$sinks_count" -eq 0 ] ; then
+    echo "No sink detected."
+    exit
+fi
+
+# set active sink index
+active_sink_index=$(pacmd list-sinks | sed -n -e 's/[[:space:]][[:space:]]\*[[:space:]]index:[[:space:]]\([[:digit:]]\)/\1/p')
+
+#### FUNCTION BEGIN
+# Show usage information
+### FUNCTION END
+usage() {
+    echo "Usage: audio-device-switch [-h][-l][-n][-i \"VendorID:ProductID[ VendorID:ProductID ...]\"]" >&2
+}
+
+#### FUNCTION BEGIN
+# Show help
+# GLOBALS: 
+#   SCRIPT_DESCRIPTION SCRIPT_VERSION
+### FUNCTION END
+help() {
+    echo "$SCRIPT_DESCRIPTION $SCRIPT_VERSION"
+    echo "Without a parameter the script switch to the next available sink."
+    echo ""
+    echo "Optional parameters:"
+    echo "  -h                          Show this help message"
+    echo "  -i VendorID:ProductID       Ignore sink from switching to it (enclose with \""
+    echo "                              and seperated by a space to ignore multiple sinks)"
+    echo "  -l                          Show a list of all sinks"
+    echo "  -n                          Send desktop notification if sink is switched"
+}
+
+#### FUNCTION BEGIN
+# List all sinks
+# GLOBALS: 
+#   all_sinks
+### FUNCTION END
+list_sinks() {
+    set_available_sinks
+    echo "ID      | VendorID:ProductID    | Description"
+    echo "--------|-----------------------|-----------------------------------------------"
+    for sink in "${all_sinks[@]}"; do
+        echo "$sink"
+    done
+}
+
+#### FUNCTION BEGIN
+# Set all and available sinks to global variables
+# GLOBALS: 
+#   all_sinks all_sink_ids available_sink_ids ignore_sink_ids ignore_sinks
+### FUNCTION END
+set_available_sinks() {
+    while read -r row ; 
+    do
+        IFS=';' read -r -a current_sink <<< "$row"
+        #echo "Index: ${current_sink[0]} Vendor: ${current_sink[1]} Product: ${current_sink[2]}"
+        all_sink_ids+=("${current_sink[0]}")
+        all_sinks+=("${current_sink[0]}       | ${current_sink[1]}:${current_sink[2]}             | ${current_sink[3]}")
+
+        for sink in "${ignore_sink_ids[@]}"; do
+            if [ "${current_sink[1]}:${current_sink[2]}" == "$sink" ] ; then
+                #echo "Exclude sink with index $sink from switching"
+                ignore_sinks+=("${current_sink[0]}")
+            fi
+        done
+    done <<<$(pacmd list-sinks | sed -n -e "s/[\ \*]*index:\ \([[:digit:]]\)\|[\ \t]*device\.description\ =\ \"\([^\"]*\)\"\|[\  \t]*device\.product\.id\ \=\ \"\([0-9a-f]\{4\}\)\"\|[\ \t]*device\.vendor\.id\ =\ \"\(....\)\"\|[\ \t]*\(ports:\)/\1\2\3\4\5/p" | awk -v RS='ports:\n' -v FS='\n' -v ORS='\n' -v OFS=';' '{ $1=$1 };1')
+
+    for index in "${all_sink_ids[@]}"; do
+        if [ "${#ignore_sinks[@]}" -ne 0 ] ; then
+            for ignoreSinkIndex in "${ignore_sinks[@]}"; do
+                if [ "$index" -ne "$ignoreSinkIndex" ] ; then
+                    available_sink_ids["${#available_sink_ids[@]}"]="$index"
+                fi
+            done
+        else
+            available_sink_ids[${#available_sink_ids[@]}]=$index
+        fi
+    done
+}
+
+#### FUNCTION BEGIN
+# Set next sink as default and move all input to it
+# GLOBALS: 
+#   active_index_position_found available_sink_ids next_sink_index
+### FUNCTION END
+set_next_sink() {
+    active_index_position_found=0
+    active_sink_index=$(pacmd list-sinks | sed -n -e 's/[[:space:]][[:space:]]\*[[:space:]]index:[[:space:]]\([[:digit:]]\)/\1/p')
+    (( next_sink_index=-1 ))
+
+    for index in "${available_sink_ids[@]}"; do
+        if [ $next_sink_index -lt 0 ] ; then
+            export next_sink_index=$index
+        fi
+        # if active sink is found this will be the next
+        if [ $active_index_position_found -eq 1 ] ; then
+            export next_sink_index=$index
+            break;
+        fi
+        # find active sink
+        if [ "$active_sink_index" -eq "$index" ] ; then
+            export active_index_position_found=1
+        fi  
+    done
+
+    # change the default sink
+    pacmd "set-default-sink ${next_sink_index}"
+
+    # move all inputs to the new sink
+    for app in $(pacmd list-sink-inputs | sed -n -e 's/index:[[:space:]]\([[:digit:]]\)/\1/p');
+    do
+        pacmd "move-sink-input $app $next_sink_index"
+    done
+}
+
+#### FUNCTION BEGIN
+# Send notification with active sink description (use -n)
+# GLOBALS: 
+#   notify available_sink_ids next_sink_index
+### FUNCTION END
+send_notification() {
+    # display notification
+    if [ $notify -ne 0 ] ; then
+        ndx=0
+        pacmd list-sinks | sed -n -e 's/device.description[[:space:]]=[[:space:]]"\(.*\)"/\1/p' | while read -r line;
+        do
+            if [ "$next_sink_index" -eq "${available_sink_ids[$ndx]}" ] ; then
+                notify-send -i preferences-desktop-multimedia "Sound output switched to:" "$line"
+                exit
+            fi
+            ((ndx++))
+        done;
+    fi
+}
+
+while getopts hi:lnv flag
+do
+    case "${flag}" in
+        h)
+            help
+            exit
+            ;;
+        i) 
+            ignore=${OPTARG}
+            IFS=' ' read -r -a ignore_sink_ids <<< "$ignore"
+            ;;
+        l)
+            list_sinks
+            exit
+            ;;    
+        n) 
+            notify=1
+            ;;
+        v)
+            echo "$SCRIPT_NAME $SCRIPT_VERSION"
+            echo "$SCRIPT_DESCRIPTION"
+            exit
+            ;;
+        *) 
+            usage
+            exit
+            ;;
+    esac
+done
+
+set_available_sinks
+set_next_sink
+send_notification
